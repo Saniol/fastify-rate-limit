@@ -940,3 +940,123 @@ test('stops fastify lifecycle after onRequest and before preValidation', t => {
     })
   })
 })
+
+test('avoid double onRequest', t => {
+  t.plan(4)
+
+  const fastify = Fastify()
+
+  let keyGeneratorCallCount = 0
+
+  const subroute = async (childServer) => {
+    childServer.register(rateLimit, {
+      max: 1,
+      timeWindow: 1000,
+      keyGenerator: (req) => {
+        t.pass('keyGenerator called only once')
+        keyGeneratorCallCount++
+
+        return req.ip
+      }
+    })
+
+    childServer.get('/', {}, (req, reply) => {
+      reply.send('hello!')
+    })
+  }
+
+  fastify.register(subroute, { prefix: '/test' })
+
+  fastify.inject({
+    url: '/test',
+    method: 'GET'
+  }, (err, res) => {
+    t.error(err)
+    t.strictEqual(res.statusCode, 200)
+    t.equal(keyGeneratorCallCount, 1)
+  })
+})
+
+test('Allow multiple different rate limiter registrations', t => {
+  t.plan(20)
+  const fastify = Fastify()
+
+  fastify.register(rateLimit, {
+    max: 1,
+    timeWindow: 1000,
+    whitelist: (req) => {
+      return req.url !== '/test'
+    }
+  })
+
+  fastify.register(rateLimit, {
+    max: 1,
+    timeWindow: 1000,
+    whitelist: (req) => {
+      return req.url === '/test'
+    }
+  })
+
+  fastify.get('/', (req, reply) => {
+    reply.send('hello!')
+  })
+
+  fastify.get('/test', (req, reply) => {
+    reply.send('hello from another route!')
+  })
+
+  fastify.inject('/', (err, res) => {
+    t.error(err)
+    t.strictEqual(res.statusCode, 200)
+    t.strictEqual(res.headers['x-ratelimit-limit'], 1)
+    t.strictEqual(res.headers['x-ratelimit-remaining'], 0)
+
+    fastify.inject('/', (err, res) => {
+      t.error(err)
+      t.strictEqual(res.statusCode, 429)
+      t.strictEqual(res.headers['content-type'], 'application/json; charset=utf-8')
+      t.strictEqual(res.headers['x-ratelimit-limit'], 1)
+      t.strictEqual(res.headers['x-ratelimit-remaining'], 0)
+      t.strictEqual(res.headers['retry-after'], 1000)
+    })
+  })
+
+  fastify.inject('/test', (err, res) => {
+    t.error(err)
+    t.strictEqual(res.statusCode, 200)
+    t.strictEqual(res.headers['x-ratelimit-limit'], 1)
+    t.strictEqual(res.headers['x-ratelimit-remaining'], 0)
+
+    fastify.inject('/test', (err, res) => {
+      t.error(err)
+      t.strictEqual(res.statusCode, 429)
+      t.strictEqual(res.headers['content-type'], 'application/json; charset=utf-8')
+      t.strictEqual(res.headers['x-ratelimit-limit'], 1)
+      t.strictEqual(res.headers['x-ratelimit-remaining'], 0)
+      t.strictEqual(res.headers['retry-after'], 1000)
+    })
+  })
+})
+
+test('With enable IETF draft spec', t => {
+  t.plan(5)
+  const fastify = Fastify()
+  fastify.register(rateLimit, {
+    global: false,
+    enableDraftSpec: true
+  })
+
+  fastify.get('/', {
+    config: defaultRouteConfig
+  }, (req, reply) => {
+    reply.send('hello!')
+  })
+
+  fastify.inject('/', (err, res) => {
+    t.error(err)
+    t.strictEqual(res.statusCode, 200)
+    t.strictEqual(res.headers['ratelimit-limit'], 2)
+    t.strictEqual(res.headers['ratelimit-remaining'], 1)
+    t.strictEqual(res.headers['ratelimit-reset'], 1)
+  })
+})
